@@ -1,0 +1,426 @@
+Web app source code
+
+// main.py
+import gradio as gr
+import logging
+from model import NERModel
+from utils import get_example_texts
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize the NER model
+ner_model = NERModel()
+
+def process_text(text):
+    """Process the input text and return formatted results"""
+    if not text.strip():
+        return "<div style='color: #666;'>Por favor, insira um texto para análise.</div>"
+    
+    try:
+        logger.info("=== Iniciando processamento de texto ===")
+        logger.info(f"Texto recebido: {text}")
+        
+        # Get entities from the model
+        entities = ner_model.process_text(text)
+        
+        logger.info(f"Entidades retornadas pelo modelo: {entities}")
+        
+        if not entities:
+            logger.warning("Nenhuma entidade encontrada pelo modelo")
+            return f"<div style='color: #666;'>Nenhuma entidade encontrada no texto: <br><br>{text}</div>"
+        
+        # Format the results with HTML markup
+        logger.info("Formatando resultado com markup HTML")
+        result = ner_model.format_result(text, entities)
+        
+        logger.info("=== Processamento concluído com sucesso ===\n")
+        return result
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Erro ao processar texto: {error_msg}")
+        logger.exception("Detalhes do erro:")
+        return f"<div style='color: #d32f2f; padding: 10px; border: 1px solid #ffcdd2; border-radius: 4px;'>"\
+               f"⚠️ Erro ao processar o texto: {error_msg}</div>"
+
+def clear_input():
+    """Clear the input text"""
+    return ""
+
+if __name__ == "__main__":
+    # Create the Gradio interface with custom CSS
+    css = """
+        .gradio-container { max-width: 48rem !important; margin-left: auto !important; margin-right: auto !important; }
+        .container { max-width: 48rem !important; margin-left: auto !important; margin-right: auto !important; }
+        .gr-form { max-width: 48rem !important; }
+        
+        /* Example section styling */
+        .gr-examples { text-align: left !important; }
+        .gr-examples button span { text-align: left !important; display: block !important; }
+        .gr-examples button { text-align: left !important; justify-content: flex-start !important; }
+        
+        /* Action buttons */
+        .gr-form button { text-align: center !important; }
+        
+        /* General text alignment */
+        .gr-box, .gr-prose, .gr-text, .gr-panel { text-align: left !important; }
+    """
+    
+    with gr.Blocks(css=css) as demo:
+        with gr.Column():
+            gr.Markdown("# ⚖️ Reconhecimento de Entidades Nomeadas (NER)")
+            gr.Markdown("Identifique automaticamente nomes de pessoas, organizações, locais e outras entidades em textos jurídicos.")
+            
+            with gr.Column():
+                input_text = gr.Textbox(
+                    label="Digite ou cole seu texto aqui:",
+                    placeholder="Ex: O ministro Alexandre de Moraes, do Supremo Tribunal Federal, determinou com base no Artigo 5º da Constituição Federal a análise do processo em março de 2023...",
+                    lines=5
+                )
+                
+                with gr.Row():
+                    clear_btn = gr.Button("Limpar")
+                    submit_btn = gr.Button("Analisar", variant="primary")
+                
+                output_text = gr.HTML()
+                
+                gr.Examples(
+                    examples=get_example_texts(),
+                    inputs=input_text,
+                    outputs=output_text,
+                    fn=process_text,
+                    label="Exemplos"
+                )
+                
+                # Set up event handlers
+                submit_btn.click(
+                    fn=process_text,
+                    inputs=input_text,
+                    outputs=output_text
+                )
+                
+                def clear_all():
+                    return "", ""
+                
+                clear_btn.click(
+                    fn=clear_all,
+                    inputs=None,
+                    outputs=[input_text, output_text]
+                )
+    
+    # Launch the interface
+    demo.launch(server_name="0.0.0.0")
+
+// model.py
+
+from transformers import AutoTokenizer, AutoModelForTokenClassification
+import torch
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class NERModel:
+    def __init__(self):
+        self.model_name = "Palu1006/ner-bert-lenerbr-large-v1"
+        self.tokenizer = None
+        self.model = None
+        self.id2label = None
+        
+        # Define the correct label mapping based on test results
+        self.label_mapping = {
+            'LABEL_0': 'O',
+            'LABEL_1': 'B-ORGANIZACAO',  # Changed from PESSOA to ORGANIZACAO
+            'LABEL_2': 'I-ORGANIZACAO',
+            'LABEL_3': 'B-PESSOA',       # Changed from ORGANIZACAO to PESSOA
+            'LABEL_4': 'I-PESSOA',
+            'LABEL_5': 'B-TEMPO',        # Changed from LOCAL to TEMPO
+            'LABEL_6': 'I-TEMPO',
+            'LABEL_7': 'B-LOCAL',        # Changed from TEMPO to LOCAL
+            'LABEL_8': 'I-LOCAL',
+            'LABEL_9': 'B-JURISPRUDENCIA',
+            'LABEL_10': 'I-JURISPRUDENCIA',
+            'LABEL_11': 'B-LEGISLACAO',
+            'LABEL_12': 'I-LEGISLACAO'
+        }
+        
+        # Category labels with proper accents and emojis
+        self.category_labels = {
+            'PESSOA': '👤 PESSOA',
+            'ORGANIZACAO': '🏢 ORGANIZAÇÃO',
+            'LOCAL': '📍 LOCAL',
+            'TEMPO': '📅 TEMPO',
+            'JURISPRUDENCIA': '⚖️ JURISPRUDÊNCIA',
+            'LEGISLACAO': '📖 LEGISLAÇÃO'
+        }
+        
+        # Valid entity types
+        self.valid_categories = set(self.category_labels.keys())
+        
+        self.load_model()
+
+    def load_model(self):
+        """Load the NER model and tokenizer"""
+        try:
+            logger.info("Carregando modelo e tokenizer...")
+            
+            # Load tokenizer with debug info
+            logger.info(f"Carregando tokenizer: {self.model_name}")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            logger.info("✓ Tokenizer carregado")
+            logger.info(f"Vocabulário do tokenizer: {len(self.tokenizer.vocab)} tokens")
+            
+            # Load model with debug info
+            logger.info(f"Carregando modelo: {self.model_name}")
+            self.model = AutoModelForTokenClassification.from_pretrained(self.model_name)
+            logger.info("✓ Modelo carregado")
+            
+            # Load model configuration
+            logger.info("=== Configuração do modelo ===")
+            logger.info(f"Arquitetura: {self.model.config.model_type}")
+            logger.info(f"Número de labels: {self.model.num_labels}")
+            
+            # Map generic labels to NER labels
+            raw_id2label = self.model.config.id2label
+            self.id2label = {k: self.label_mapping[v] for k, v in raw_id2label.items()}
+            
+            logger.info("\nMapeamento de labels:")
+            for idx, label in raw_id2label.items():
+                mapped_label = self.label_mapping[label]
+                logger.info(f"  {idx}: {label} -> {mapped_label}")
+            
+            logger.info("\nCategorias válidas:")
+            logger.info(f"  {sorted(self.valid_categories)}")
+            
+            logger.info("✓ Inicialização completa!")
+        except Exception as e:
+            logger.error(f"⚠️ Erro ao carregar o modelo: {str(e)}")
+            raise
+
+    def process_text(self, text):
+        """Process text and return named entities"""
+        try:
+            logger.info(f"Processando texto: {text[:100]}...")
+            
+            # Split into tokens, treating punctuation as separate tokens
+            import re
+            tokens = []
+            for word in text.split():
+                # Split word into parts (word + punctuation)
+                parts = re.findall(r'[\w\-]+|[.,!?;]', word)
+                tokens.extend(parts)
+            
+            logger.info(f"Tokens no texto: {len(tokens)}")
+            
+            # Tokenize like the training data
+            logger.info("Tokenizando texto...")
+            tokenized_inputs = self.tokenizer(
+                tokens,
+                is_split_into_words=True,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True
+            )
+            
+            # Get model predictions
+            logger.info("Obtendo predições do modelo...")
+            with torch.no_grad():
+                outputs = self.model(**tokenized_inputs)
+                predictions = outputs.logits.argmax(-1)[0]
+            
+            # Process predictions using word IDs
+            word_ids = tokenized_inputs.word_ids()
+            previous_word_idx = None
+            current_entity = None
+            entities = []
+            current_tokens = []
+            processed_positions = set()  # Track processed positions to avoid duplicates
+            
+            # Debug predictions
+            logger.info("Predictions:")
+            for token_idx, (word_id, pred_id) in enumerate(zip(word_ids, predictions)):
+                if word_id is not None and word_id != previous_word_idx:
+                    label = self.id2label[pred_id.item()]
+                    token = tokens[word_id]
+                    
+                    # Skip punctuation tokens
+                    if re.match(r'^[.,!?;]$', token):
+                        continue
+                        
+                    logger.info(f"Token: {token}, Label: {label}")
+                    
+                    if label == "O":
+                        if current_entity:
+                            current_entity["text"] = " ".join(current_tokens)
+                            entities.append(current_entity)
+                            current_entity = None
+                            current_tokens = []
+                    else:
+                        entity_type = label[2:]  # Remove B-/I- prefix
+                        
+                        if label.startswith("B-"):
+                            if current_entity:
+                                current_entity["text"] = " ".join(current_tokens)
+                                entities.append(current_entity)
+                            
+                            token_start = text.find(token)
+                            # Only create new entity if we haven't processed this position
+                            if token_start not in processed_positions:
+                                current_tokens = [token]
+                                current_entity = {
+                                    "type": entity_type,
+                                    "text": token,
+                                    "start": token_start
+                                }
+                                processed_positions.add(token_start)
+                        elif label.startswith("I-") and current_entity and current_entity["type"] == entity_type:
+                            current_tokens.append(token)
+                    
+                previous_word_idx = word_id
+            
+            # Add final entity if exists
+            if current_entity:
+                current_entity["text"] = " ".join(current_tokens)
+                entities.append(current_entity)
+            
+            # Deduplicate entities
+            seen_entities = {}
+            for entity in entities:
+                key = (entity['type'], entity['text'].strip())
+                if key not in seen_entities:
+                    seen_entities[key] = entity
+            
+            # Use only unique entities
+            entities = list(seen_entities.values())
+            
+            # Remove exact duplicates (same text, type and position)
+            unique_entities = []
+            seen = set()
+            
+            for entity in entities:
+                key = (entity['type'], entity['text'].strip(), entity['start'])
+                if key not in seen:
+                    seen.add(key)
+                    unique_entities.append(entity)
+            
+            # Sort by appearance in text
+            unique_entities.sort(key=lambda x: x.get('start', 0))
+            
+            logger.info(f"Found {len(unique_entities)} unique entities:")
+            for e in unique_entities:
+                logger.info(f"  - {e['type']}: {e['text']}")
+
+            # Post-process entities to fix positions
+            processed_entities = []
+            for entity in unique_entities:
+                # Add 1 to start position to account for the space before the word
+                if entity['start'] > 0:
+                    entity['start'] += 1
+                processed_entities.append(entity)
+
+            logger.info(f"Entidades encontradas: {len(processed_entities)}")
+            for entity in processed_entities:
+                logger.info(f"- {entity['text']} ({entity['type']})")
+
+            return processed_entities
+
+        except Exception as e:
+            logger.error(f"Erro ao processar texto: {str(e)}")
+            raise
+
+    def format_result(self, text, entities):
+        """Format the results with HTML markup"""
+        try:
+            if not entities:
+                return text
+
+            logger.info(f"Formatando resultado com {len(entities)} entidades encontradas")
+            
+            # Add bold markup for entities in the text
+            marked_text = text
+            for entity in sorted(entities, key=lambda x: x.get("start", 0), reverse=True):
+                entity_text = entity["text"].strip()
+                marked_text = marked_text.replace(entity_text, f'<strong>{entity_text}</strong>')
+            
+            # Group entities by type
+            entities_by_type = {}
+            for entity in entities:
+                entity_type = entity["type"]
+                if entity_type not in entities_by_type:
+                    entities_by_type[entity_type] = []
+                entities_by_type[entity_type].append(entity)
+            
+            # Create type summary with one type per line
+            type_summary = []
+            # Sort entity types to ensure consistent order
+            for entity_type in sorted(entities_by_type.keys()):
+                entity_texts = [e["text"].strip() for e in entities_by_type[entity_type]]
+                display_type = self.category_labels[entity_type]
+                type_summary.append(f"{display_type}: {', '.join(entity_texts)}")
+            
+            # Build final output
+            result = f"<div class='results-container'>"
+            result += f"<div class='entity-count'>{len(entities)} entidade{'s' if len(entities) != 1 else ''} encontrada{'s' if len(entities) != 1 else ''} no texto:</div>"
+            result += "<br>"
+            result += "<div class='entity-summary'>"
+            for summary in type_summary:
+                result += f"<div>{summary}</div>"
+            result += "</div>"
+            result += "<br>"
+            result += f"<div class='marked-text'>{marked_text}</div>"
+            result += "</div>"
+            
+            logger.info("✓ Formatação concluída")
+            return result
+        except Exception as e:
+            logger.error(f"Erro ao formatar resultado: {str(e)}")
+            raise
+
+// utils.py
+
+def get_example_texts():
+    """Return a list of example texts showcasing different entity types"""
+    return [
+        # Example with PESSOA, ORGANIZACAO, LOCAL, LEGISLACAO, TEMPO
+        "A ministra Rosa Weber, do Supremo Tribunal Federal, apresentou em Brasília um relatório sobre a Lei 14.534 em março de 2023.",
+        
+        # Example with PESSOA, ORGANIZACAO, LOCAL, JURISPRUDENCIA
+        "O juiz Ricardo Leite, do Tribunal Regional Federal, citou em São Paulo a Súmula 611 do STJ sobre direitos trabalhistas.",
+        
+        # Example with multiple ORGANIZACAO, LOCAL, LEGISLACAO
+        "O Banco Central e a Receita Federal divulgaram em Brasília novas diretrizes sobre a Lei de Responsabilidade Fiscal.",
+        
+        # Example with PESSOA, ORGANIZACAO, LOCAL, TEMPO, JURISPRUDENCIA
+        "Em janeiro, o ministro Alexandre de Moraes do STF conduziu em Brasília uma audiência sobre o Artigo 5º da Constituição.",
+        
+        # Example with all categories
+        "O presidente do TSE, Roberto Barroso, analisou em dezembro no Rio de Janeiro o Código Eleitoral e a Súmula 123, citando a Lei Complementar 64."
+    ]
+
+def create_legend_html():
+    """Create HTML for the entity type legend"""
+    return """
+    <div class="legend">
+        <div class="legend-item">
+            <span class="entity-pessoa">Pessoa</span>
+        </div>
+        <div class="legend-item">
+            <span class="entity-org">Organização</span>
+        </div>
+        <div class="legend-item">
+            <span class="entity-local">Local</span>
+        </div>
+        <div class="legend-item">
+            <span class="entity-tempo">Tempo</span>
+        </div>
+        <div class="legend-item">
+            <span class="entity-valor">Valor</span>
+        </div>
+        <div class="legend-item">
+            <span class="entity-outro">Outros</span>
+        </div>
+    </div>
+    """
